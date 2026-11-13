@@ -229,6 +229,12 @@ patch --batch -o local/shared/Commands.cpp ../sumatrapdf/src/shared/Commands.cpp
 
 如果要让书签真正写进 PDF 的 `/Outlines`，走 `pdf-bookmarks/` 里的 MuPDF JS 脚本（`add-pdf-bookmarks.js`），那是另一条路线，不进 GUI。
 
+### Ctrl+B 加书签时整页闪一下（已修）
+
+原因：重建书签树时会`ShowWindow(SW_HIDE)`→删除→重建→`SW_SHOW`，中间状态（空面板、半布局的画布）会被真实绘制出来，看起来就是整页闪白。
+
+修法（`local/TableOfContents.cpp`）：用 `LockWindowUpdate(win->hwndFrame)` 把整个重建过程锁住（RAII 结构 `ScopedWindowUpdateLock`），结束后只做一次 `RDW_INVALIDATE|RDW_NOERASE` 的重绘，不擦背景。
+
 ### 关于「菜单栏默认隐藏」
 
 本构建开了 `UseTabs`，SumatraPDF 会改用自定义标题栏，传统菜单栏（File/Edit/...）默认不显示 —— 这跟工具栏有没有空位无关，工具栏只是工具栏。
@@ -260,7 +266,7 @@ git diff v1.0-bookmark     # 之后改了什么
 ### 补丁
 
 ```
-local/TableOfContents.patch     467 行（合并模型、书签行右键菜单、面板空白处右键加书签、重建与刷新）
+local/TableOfContents.patch     490 行（合并模型、书签行右键菜单、面板空白处右键加书签、重建与刷新）
 local/AddFavoriteDialog.patch    29 行（命名框标题与按钮 Add Favorite → Add Bookmark）
 local/FavoritesCommon.patch      44 行（HasUserBookmarks、刷新挂钩、菜单动态文案改书签）
 local/Menu.patch                 62 行（右键菜单文案与启用条件）
@@ -274,4 +280,4 @@ local/SumatraPDF.patch          151 行（累加：会话/缓存/书签声明）
 
 
 产物：`dist/SumatraPDF-static-bookmarks.exe`，21,800,960 字节，
-SHA-256 `45a2a99ba19e77e767d3886d90b747cf196e4f1bb85f61ebee82dd4a5826062e`（2026-11-13 20:26，含上面的书签改造）。
+SHA-256 `c99676997d898f49b102c70bde2446532fc22178654087f8e790a0f56237c5d7`（2026-11-13 20:55，含上面的书签改造 + 防闪烁）。
