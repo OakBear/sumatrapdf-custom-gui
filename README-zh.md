@@ -249,6 +249,25 @@ patch --batch -o local/shared/Commands.cpp ../sumatrapdf/src/shared/Commands.cpp
 
 本仓库把 `ShowMenubarWithTabs` 的默认值改成了 `true`（`local/Settings.cpp`），在 Windows 上打开就是带菜单栏的界面。
 
+### 在 VNC 桌面上直接体验这个 EXE
+
+EXE 是纯静态链接的 Windows 程序，Wine 直接跑，不需要 Windows，也不需要重新编译：
+
+```sh
+cd /cluster/home/it_stu171/rea/sumatrapdf-build
+./run-on-desktop.sh                 # 起始页
+./run-on-desktop.sh ~/doc/a.pdf     # 打开指定 PDF
+```
+
+脚本做的事：`DISPLAY${DISPLAY:-:0}`（本机 VNC 桌面就是 `:0`）、Wine 前缀放本地磁盘 `/tmp`、配置（含书签）放 `~/sumatra-bm-appdata`，所以关掉重开书签还在。
+
+| 事项 | 说明 |
+| --- | --- |
+| 为什么前缀放 `/tmp` | BeeGFS 上的 `$HOME` 建前缀要几分钟，`/tmp` 几十秒 |
+| 重启后 | `/tmp` 没了，脚本会自动重建前缀（几十秒），书签不受影响 |
+| 已知显示问题 | Wine 下侧栏偶尔出现黑块（原版也一样），换页/改窗口大小会刷好 |
+| 字体 | Wine 没有中文字体，书签名叫中文会显示成方块，配置文件里的内容是对的 |
+
 ### 版本管理（git）
 
 本目录已经是独立 git 仓库（上游克隆不在其中，只记录 commit 号，见 `UPSTREAM.txt`）：
