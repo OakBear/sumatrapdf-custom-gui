@@ -1,0 +1,58 @@
+--- a/src/shared/AppSettings.cpp
++++ b/src/shared/AppSettings.cpp
+@@ -82,6 +82,8 @@
+ // workaround for OnMenuExit
+ // if this flag is set, CloseWindow will not save prefs before closing the window.
+ bool gDontSaveSettings = false;
++// Never replace the last complete session while startup is rebuilding it.
++bool gRestoringSessionSnapshot = false;
+ 
+ // coalesces ScheduleSaveSettings() onto one uitask; a sync SaveSettings()
+ // clears it so a pending post becomes a no-op
+@@ -702,6 +704,9 @@
+ // force: Open Settings File. -for-testing and exit skip every other save.
+ static bool SaveSettings(bool force) {
+     gSaveSettingsPending = false;
++    if (gRestoringSessionSnapshot) {
++        return false;
++    }
+     if (!force && gForTesting) {
+         // started with -for-testing for ad-hoc testing: don't modify
+         // the settings of the tester
+@@ -778,8 +783,25 @@
+         return true;
+     }
+ 
++    // Write a unique sibling first: a failed or interrupted write must leave
++    // the last complete settings file intact.
+     WatchedFileSetIgnore(gWatchedSettingsFile, true);
+-    bool ok = file::WriteFile(path, prefs);
++    WCHAR tmpName[MAX_PATH]{};
++    TempStr dir = path::GetDirTemp(path);
++    bool ok = false;
++    if (GetTempFileNameW(CWStrTemp(dir), L"sp", 0, tmpName) != 0) {
++        TempStr tmp = ToUtf8Temp(tmpName);
++        ok = file::WriteFile(tmp, prefs) && file::RenameReplace(path, tmp);
++        if (!ok) {
++            file::Delete(tmp);
++        }
++    } else {
++        // GetTempFileNameW is limited to MAX_PATH, so a long settings directory
++        // cannot use the atomic swap. Fall back to the previous in-place write
++        // (which does handle long paths) so saving keeps working there.
++        logf("SaveSettings: no temp file for '%s', writing in place\n", path);
++        ok = file::WriteFile(path, prefs);
++    }
+     if (ok) {
+         RememberLastSavedPrefs(prefs);
+         gSettings->lastPrefUpdate = file::GetModificationTime(path);
+@@ -1813,7 +1835,8 @@
+         const char* srcName = gFileStateInfo.fieldNames;
+         for (int i = 0; i < dimofi(gFileStateFields); i++) {
+             Str name = Str(srcName);
+-            if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0) {
++            if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0 ||
++                (!dropHistory && str::Eq(name, StrL("LastOpenedUtc")))) {
+                 keepFields[nKeep] = gFileStateFields[i];
+                 int n = len(name);
+                 ReportIf(namesLen + n + 1 > (int)sizeof(keepNames));

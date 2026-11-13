@@ -1,0 +1,69 @@
+--- a/src/Menu.cpp
++++ b/src/Menu.cpp
+@@ -57,6 +57,9 @@
+ #include "MenuCommon.h"
+ #include "MenuDefs.h"
+ 
++// defined in FavoritesCommon.cpp: true if this file has user bookmarks
++bool HasUserBookmarks(MainWindow* win);
++
+ // value associated with menu item for owner-drawn purposes
+ struct MenuOwnerDrawInfo {
+     Str text;
+@@ -219,18 +222,14 @@
+     },
+     // note: strings cannot be "" or else items are not there
+     {
+-        StrL("Add to favorites"),
++        StrL("Add Bookmark"),
+         CmdFavoriteAdd,
+     },
+     {
+-        StrL("Remove from favorites"),
++        StrL("Remove Bookmark"),
+         CmdFavoriteDel,
+     },
+     {
+-        TrN("Show &Favorites"),
+-        CmdFavoriteToggle,
+-    },
+-    {
+         TrN("Show &Bookmarks"),
+         CmdToggleBookmarks,
+     },
+@@ -905,7 +904,8 @@
+ 
+     MenuUpdatePrintItem(win, win->menu);
+ 
+-    bool enabled = win->IsDocLoaded() && tab && tab->ctrl->HasToc();
++    bool enabled = win->IsDocLoaded() && tab && tab->ctrl &&
++                   (tab->ctrl->HasToc() || HasUserBookmarks(win));
+     MenuSetEnabled(win->menu, CmdToggleBookmarks, enabled);
+ 
+     bool documentSpecific = win->IsDocLoaded();
+@@ -1224,7 +1224,7 @@
+     SetMenuStateForSelection(tab, popup);
+ 
+     MenuUpdatePrintItem(win, popup, true);
+-    MenuSetEnabled(popup, CmdToggleBookmarks, win->ctrl->HasToc());
++    MenuSetEnabled(popup, CmdToggleBookmarks, win->ctrl->HasToc() || HasUserBookmarks(win));
+     MenuSetChecked(popup, CmdToggleBookmarks, IsSidebarViewShown(win, SidebarView::Bookmarks));
+     MenuSetEnabled(popup, CmdToggleThumbnails, CanShowThumbnails(tab));
+     MenuSetChecked(popup, CmdToggleThumbnails, IsSidebarViewShown(win, SidebarView::Thumbnails));
+@@ -1244,12 +1244,12 @@
+             TempStr delText;
+             if (ShowChapterUi(win->ctrl)) {
+                 Location loc = win->ctrl->LocationFromPageNo(pageNoUnderCursor);
+-                addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
+-                delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
++                addText = fmt(Tr("Add Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
++                delText = fmt(Tr("Remove Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
+             } else {
+                 TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNoUnderCursor);
+-                addText = fmt(Tr("Add page %s to favorites").s, pageLabel);
+-                delText = fmt(Tr("Remove page %s from favorites").s, pageLabel);
++                addText = fmt(Tr("Add Bookmark (page %s)").s, pageLabel);
++                delText = fmt(Tr("Remove Bookmark (page %s)").s, pageLabel);
+             }
+ 
+             if (isBookmarked) {

@@ -1,0 +1,32 @@
+--- a/src/shared/RenderCache.h
++++ b/src/shared/RenderCache.h
+@@ -79,6 +79,11 @@
+     // RenderCache::darkModeEpoch at render time; entries from an older epoch
+     // were rendered/recolored with stale colors and must not be reused
+     u32 darkModeEpoch = 0;
++    // bytes the bitmap occupies; the cache budget is in bytes, not entries
++    int byteSize = 0;
++    // GetTickCount64() of the last paint that used this entry; idle entries are
++    // dropped after kCacheIdleTtlMs so a forgotten tab doesn't pin memory
++    u64 lastUse = 0;
+ 
+     BitmapCacheEntry(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile, Pixmap* bitmap) {
+         this->dm = dm;
+@@ -157,6 +162,8 @@
+ struct RenderCache {
+     BitmapCacheEntry* cache[kMaxBitmapsCached]{};
+     int cacheCount = 0;
++    // sum of byteSize over cache entries; maintained by Add()/DropCacheEntry()
++    size_t cachedBytes = 0;
+     // make sure to never ask for requestAccess in a cacheAccess
+     // protected critical section in order to avoid deadlocks
+     RecursiveMutex cacheAccess;
+@@ -273,6 +280,8 @@
+                   bool renderMissing, bool* renderOutOfDateCue, bool* renderedReplacement);
+     void LogCacheSize();
+     i64 CacheBytes(int& nEntriesOut);
++    size_t CacheBudgetBytes();
++    void TrimIdleEntries();
+ 
+     void RecordFinishedRequest(PageRenderRequest* req);
+     void SerializeQueueState(str::Builder& s);

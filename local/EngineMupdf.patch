@@ -1,0 +1,14 @@
+--- a/src/shared/EngineMupdf.cpp
++++ b/src/shared/EngineMupdf.cpp
+@@ -3530,7 +3530,10 @@
+     fz_locks_ctx.user = this;
+     fz_locks_ctx.lock = fz_lock_context_cs;
+     fz_locks_ctx.unlock = fz_unlock_context_cs;
+-    _ctx = fz_new_context(nullptr, &fz_locks_ctx, FZ_STORE_DEFAULT);
++    // Experimental per-engine cache budget, not a hard memory limit: active
++    // references can prevent eviction, and smaller stores can increase decoding.
++    constexpr size_t kMupdfStoreBudget = 64u * 1024u * 1024u;
++    _ctx = fz_new_context(nullptr, &fz_locks_ctx, kMupdfStoreBudget);
+     if (!_ctx) {
+         // can happen when out of memory. Load() will fail
+         log(StrL("EngineMupdf: fz_new_context() failed\n"));

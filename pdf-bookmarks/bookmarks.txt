@@ -1,0 +1,14 @@
+# PDF bookmark list: level,page,title
+# - page is 1-based (physical page in the PDF)
+# - level 1 = top-level bookmark; level 2 nests under the nearest level 1, etc.
+# - a title may contain commas; only the first two commas are separators
+# - lines starting with # and empty lines are ignored
+1,1,Chapter 1 Introduction
+2,3,1.1 Background
+2,7,1.2 Method
+1,25,Chapter 2 Portfolio Construction
+2,30,2.1 Constraints
+3,33,2.1.1 Turnover limits
+1,60,Chapter 3 Risk Models
+1,120,Chapter 4 Backtesting
+1,180,Appendix

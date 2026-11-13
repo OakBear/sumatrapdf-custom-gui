@@ -1,0 +1,11 @@
+--- tree/src/gui/Gfx.cpp
++++ local/Gfx.cpp
+@@ -342,7 +342,7 @@
+     return (prev & LAYOUT_RTL) != 0;
+ }
+ 
+-bool gUseDirect2D = true;
++bool gUseDirect2D = false;
+ 
+ // The two implementations that draw the same way (anti-aliased shapes, their
+ // own text layout), so that flipping gUseDirect2D swaps the backend under

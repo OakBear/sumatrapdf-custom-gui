@@ -1,0 +1,13 @@
+--- tree/src/shared/ReadAloud_win.cpp
++++ local/ReadAloud_win.cpp
+@@ -5,7 +5,10 @@
+ #include "base/Win.h"
+ 
+ #include <roapi.h>
++// Avoid Clang resolving the SDK ABI::Windows::UI::Color forward declaration to the global Color alias.
++#define Color WinRTSDKColor
+ #include <windows.media.speechsynthesis.h>
++#undef Color
+ // must come after the windows.media headers: both define SpeechRecognizerState
+ // and this order compiles in both msvc and clang
+ #include <sapi.h>
