@@ -8,7 +8,7 @@
  #include "Commands.h"
  #include "Translations.h"
  #include "Tabs.h"
-@@ -45,6 +46,305 @@
+@@ -45,6 +46,328 @@
  
  // set tooltip for this item but only if the text isn't fully shown
  // TODO: I might have lost something in translation
@@ -237,10 +237,28 @@
 +
 +// Called after a bookmark was added / renamed / removed so the Bookmarks pane
 +// picks up the change immediately.
++// Holds the window back from painting while the tree is torn down and rebuilt:
++// without it the frame paints the intermediate states (an empty pane, a
++// half-relaid-out canvas) and the page visibly flashes.
++struct ScopedWindowUpdateLock {
++    HWND hwnd;
++    explicit ScopedWindowUpdateLock(HWND h) : hwnd(h) {
++        if (hwnd) {
++            LockWindowUpdate(hwnd);
++        }
++    }
++    ~ScopedWindowUpdateLock() {
++        if (hwnd) {
++            LockWindowUpdate(nullptr);
++        }
++    }
++};
++
 +static void BookmarksAfterFavoritesChanged(MainWindow* win) {
 +    if (!IsMainWindowValidAndNotClosing(win)) {
 +        return;
 +    }
++    ScopedWindowUpdateLock paintLock(win->hwndFrame);
 +    WindowTab* tab = win->CurrentTab();
 +    Str filePath = tab ? tab->filePath : Str{};
 +    bool hasBookmarks = len(BookmarksForFile(filePath)) > 0;
@@ -265,6 +283,11 @@
 +        if (hwndTree) {
 +            ShowWindow(hwndTree, SW_SHOW);
 +        }
++    }
++    // one repaint for the whole rebuild, and none of the intermediate states
++    if (win->hwndFrame) {
++        uint flags = RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE | RDW_FRAME | RDW_UPDATENOW;
++        RedrawWindow(win->hwndFrame, nullptr, nullptr, flags);
 +    }
 +}
 +
@@ -314,7 +337,7 @@
  static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
      auto* treeView = ev->treeView;
      auto ti = ev->treeItem;
-@@ -181,6 +481,7 @@
+@@ -181,6 +504,7 @@
      // and we need it to bail out early
      win->tocLoaded = false;
  
@@ -322,7 +345,7 @@
      win->tocTreeView->Clear();
      VecReset(win->tocMatchingItems);
  
-@@ -484,6 +785,10 @@
+@@ -484,6 +808,10 @@
      if (ti == TreeModel::kNullItem) {
          pt = {ev->mouseScreen.x, ev->mouseScreen.y};
      }
@@ -333,7 +356,7 @@
      int pageNo = 0;
      TocItem* dti = (TocItem*)ti;
      IPageDestination* dest = dti ? dti->dest : nullptr;
-@@ -544,12 +849,12 @@
+@@ -544,12 +872,12 @@
          TempStr delText;
          if (win->ctrl->HasChapters()) {
              Location loc = win->ctrl->LocationFromPageNo(pageNo);
@@ -350,7 +373,7 @@
          }
  
          if (isBookmarked) {
-@@ -564,6 +869,17 @@
+@@ -564,6 +892,17 @@
          MenuRemove(popup, CmdFavoriteAdd);
          MenuRemove(popup, CmdFavoriteDel);
      }
@@ -368,7 +391,7 @@
      RemoveBadMenuSeparators(popup);
      MarkMenuOwnerDraw(popup);
      uint flags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
-@@ -593,7 +909,11 @@
+@@ -593,7 +932,11 @@
              ExpandTocToCurrentPage(win);
              break;
          case CmdFavoriteAdd:
@@ -381,7 +404,7 @@
              break;
          case CmdFavoriteDel:
              DelFavorite(filePath, pageNo, win->ctrl);
-@@ -640,7 +960,10 @@
+@@ -640,7 +983,10 @@
      }
  
      auto* tocTree = tab->ctrl ? tab->ctrl->GetToc() : nullptr;
@@ -393,7 +416,7 @@
          return;
      }
  
-@@ -650,7 +973,9 @@
+@@ -650,7 +996,9 @@
      // consider a ToC tree right-to-left if a more than half of the
      // alphabetic characters are in a right-to-left script
      int l2r = 0, r2l = 0;
@@ -404,7 +427,7 @@
      bool isRTL = r2l > l2r;
  
      TreeView* treeView = win->tocTreeView;
-@@ -658,13 +983,15 @@
+@@ -658,13 +1006,15 @@
      HwndSetRtl(hwnd, isRTL);
  
      UpdateControlsColors(win);
@@ -423,7 +446,7 @@
      if (SidebarPanel* p = SidebarPanelShowing(win, SidebarView::Bookmarks)) {
          RelayoutSidebarPanel(p);
      }
-@@ -677,14 +1004,17 @@
+@@ -677,14 +1027,17 @@
          return;
      }
      WindowTab* tab = win->CurrentTab();
@@ -443,7 +466,7 @@
  }
  
  // The controller swapped in a different TocTree (the markdown / html TOC is
-@@ -1040,6 +1370,10 @@
+@@ -1040,6 +1393,10 @@
          ReportIf(true);
          return;
      }
@@ -454,7 +477,7 @@
      GoToTocTreeItem(win, (TocItem*)ev->treeItem, true);
  }
  
-@@ -1066,6 +1400,10 @@
+@@ -1066,6 +1423,10 @@
          gTocSelChangedByMouseClick = true;
      }
      bool allowExternal = ev->byMouse;

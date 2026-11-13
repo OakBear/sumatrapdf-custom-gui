@@ -271,10 +271,28 @@ static TreeModel* BookmarksTreeModel(MainWindow* win, TocTree* toc) {
 
 // Called after a bookmark was added / renamed / removed so the Bookmarks pane
 // picks up the change immediately.
+// Holds the window back from painting while the tree is torn down and rebuilt:
+// without it the frame paints the intermediate states (an empty pane, a
+// half-relaid-out canvas) and the page visibly flashes.
+struct ScopedWindowUpdateLock {
+    HWND hwnd;
+    explicit ScopedWindowUpdateLock(HWND h) : hwnd(h) {
+        if (hwnd) {
+            LockWindowUpdate(hwnd);
+        }
+    }
+    ~ScopedWindowUpdateLock() {
+        if (hwnd) {
+            LockWindowUpdate(nullptr);
+        }
+    }
+};
+
 static void BookmarksAfterFavoritesChanged(MainWindow* win) {
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    ScopedWindowUpdateLock paintLock(win->hwndFrame);
     WindowTab* tab = win->CurrentTab();
     Str filePath = tab ? tab->filePath : Str{};
     bool hasBookmarks = len(BookmarksForFile(filePath)) > 0;
@@ -299,6 +317,11 @@ static void BookmarksAfterFavoritesChanged(MainWindow* win) {
         if (hwndTree) {
             ShowWindow(hwndTree, SW_SHOW);
         }
+    }
+    // one repaint for the whole rebuild, and none of the intermediate states
+    if (win->hwndFrame) {
+        uint flags = RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE | RDW_FRAME | RDW_UPDATENOW;
+        RedrawWindow(win->hwndFrame, nullptr, nullptr, flags);
     }
 }
 

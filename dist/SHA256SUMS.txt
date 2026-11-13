@@ -1,1 +1,1 @@
-45a2a99ba19e77e767d3886d90b747cf196e4f1bb85f61ebee82dd4a5826062e  SumatraPDF-static-bookmarks.exe
+c99676997d898f49b102c70bde2446532fc22178654087f8e790a0f56237c5d7  SumatraPDF-static-bookmarks.exe
