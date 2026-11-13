@@ -1,0 +1,467 @@
+--- a/src/TableOfContents.cpp
++++ b/src/TableOfContents.cpp
+@@ -28,6 +28,7 @@
+ #include "Favorites.h"
+ #include "WindowTab.h"
+ #include "resource.h"
++#include "PagePosition.h"
+ #include "Commands.h"
+ #include "Translations.h"
+ #include "Tabs.h"
+@@ -45,6 +46,305 @@
+ 
+ // set tooltip for this item but only if the text isn't fully shown
+ // TODO: I might have lost something in translation
++// ---------------------------------------------------------------------------
++// User bookmarks in the Bookmarks pane
++// ---------------------------------------------------------------------------
++// Ctrl+B adds a "favorite": a name plus a page and scroll position, stored per
++// file in the settings. That *is* SumatraPDF's user bookmark, but it only ever
++// appeared in the Favorites pane, so pressing Ctrl+B looked nothing like "add a
++// bookmark" (PDF-XChange Editor puts a new bookmark straight into the Bookmarks
++// pane). Show them there too, above the document's own outline.
++//
++// The items are synthetic TocItems and the document's outline is never
++// modified; only the model handed to the tree view changes.
++
++static constexpr int kBookmarkItemIdBase = 1000000;
++
++static bool IsUserBookmarkItem(TocItem* ti) {
++    return ti && ti->id >= kBookmarkItemIdBase;
++}
++
++// Tree model that prepends the user's bookmarks to the document outline.
++struct BookmarksModel : TreeModel {
++    // not owned; null when the document has no outline of its own
++    TreeModel* outline = nullptr;
++    // used as the invisible root when there is no outline
++    TocItem* ownRoot = nullptr;
++    // one synthetic item per user bookmark, parallel to favs
++    Vec<TocItem*> items;
++    Vec<Favorite*> favs;
++
++    ~BookmarksModel() override {
++        for (TocItem* ti : items) {
++            FreeTocItemRec(nullptr, ti);
++        }
++        FreeTocItemRec(nullptr, ownRoot);
++    }
++
++    TreeItem RootItem() const { return outline ? outline->Root() : (TreeItem)ownRoot; }
++
++    TreeItem Root() override { return RootItem(); }
++
++    Str Text(TreeItem ti) override {
++        auto* it = (TocItem*)ti;
++        if (!it) {
++            return {};
++        }
++        if (IsUserBookmarkItem(it) || !outline) {
++            return it->title;
++        }
++        return outline->Text(ti);
++    }
++
++    TreeItem Parent(TreeItem ti) override {
++        auto* it = (TocItem*)ti;
++        if (!it) {
++            return kNullItem;
++        }
++        if (IsUserBookmarkItem(it) || (!outline && it != ownRoot)) {
++            return RootItem();
++        }
++        if (!outline) {
++            return kNullItem;
++        }
++        return outline->Parent(ti);
++    }
++
++    int ChildCount(TreeItem ti) override {
++        bool isRoot = (ti == RootItem());
++        int nFavs = len(items);
++        if (!outline) {
++            return isRoot ? nFavs : 0;
++        }
++        int n = outline->ChildCount(ti);
++        return isRoot ? n + nFavs : n;
++    }
++
++    TreeItem ChildAt(TreeItem ti, int idx) override {
++        int nFavs = len(items);
++        if (ti == RootItem()) {
++            if (idx >= 0 && idx < nFavs) {
++                return (TreeItem)items[idx];
++            }
++            if (!outline) {
++                return kNullItem;
++            }
++            return outline->ChildAt(ti, idx - nFavs);
++        }
++        if (!outline) {
++            return kNullItem;
++        }
++        return outline->ChildAt(ti, idx);
++    }
++
++    bool IsExpanded(TreeItem ti) override {
++        if (ti == RootItem()) {
++            return true;
++        }
++        auto* it = (TocItem*)ti;
++        if (!it || IsUserBookmarkItem(it) || !outline) {
++            return false;
++        }
++        return outline->IsExpanded(ti);
++    }
++
++    void SetUserData(TreeItem ti, uintptr_t data) override {
++        // TreeView stores its HTREEITEM here; bookmarks don't need it
++        auto* it = (TocItem*)ti;
++        if (it) {
++            it->userData = data;
++        }
++    }
++
++    uintptr_t GetUserData(TreeItem ti) override {
++        auto* it = (TocItem*)ti;
++        return it ? it->userData : 0;
++    }
++};
++
++struct BookmarksModelSlot {
++    MainWindow* win = nullptr;
++    BookmarksModel* model = nullptr;
++    Str filePath;
++};
++
++// one merged model per window; only the current tab's is ever shown
++static Vec<BookmarksModelSlot> gBookmarksModels;
++
++static BookmarksModelSlot* FindBookmarksSlot(MainWindow* win) {
++    for (BookmarksModelSlot& s : gBookmarksModels) {
++        if (s.win == win) {
++            return &s;
++        }
++    }
++    return nullptr;
++}
++
++static void DropBookmarksModel(MainWindow* win) {
++    for (int i = len(gBookmarksModels) - 1; i >= 0; i--) {
++        if (gBookmarksModels[i].win != win) {
++            continue;
++        }
++        if (win && win->tocTreeView) {
++            // the tree view holds HTREEITEMs for the items we're about to free
++            win->tocTreeView->Clear();
++        }
++        delete gBookmarksModels[i].model;
++        str::FreePtr(&gBookmarksModels[i].filePath);
++        VecRemoveAt(gBookmarksModels, i);
++    }
++}
++
++// Favorites that should show up in the Bookmarks pane for this file.
++static Vec<Favorite*> BookmarksForFile(Str filePath) {
++    Vec<Favorite*> res;
++    if (len(filePath) == 0) {
++        return res;
++    }
++    FileState* fs = GetFavByFilePath(filePath);
++    if (!fs || !fs->favorites) {
++        return res;
++    }
++    for (Favorite* fav : *fs->favorites) {
++        if (fav && fav->name) {
++            VecPush(nullptr, res, fav);
++        }
++    }
++    return res;
++}
++
++static BookmarksModel* BuildBookmarksModel(MainWindow* win, TocTree* toc) {
++    auto* model = new BookmarksModel();
++    bool hasOutline = toc && toc->root && toc->root->child;
++    model->outline = hasOutline ? (TreeModel*)toc : nullptr;
++    if (!hasOutline) {
++        model->ownRoot = AllocTocItem(nullptr, {}, 0);
++    }
++    WindowTab* tab = win->CurrentTab();
++    Str filePath = tab ? tab->filePath : Str{};
++    int i = 0;
++    for (Favorite* fav : BookmarksForFile(filePath)) {
++        // same look as an outline row: the name plus its page number on the
++        // right. Chaptered documents store "bm:<name>" instead of a page
++        // number, so fall back to the readable label (it carries the chapter).
++        StoredPagePos pos = ParseStoredPagePos(fav->pageNo);
++        int pageNo = len(pos.bookmark) == 0 ? pos.pageNo : 0;
++        Str label = pageNo > 0 ? fav->name : FavReadableNameTemp(fav);
++        TocItem* ti = AllocTocItem(nullptr, label, pageNo);
++        ti->id = kBookmarkItemIdBase + i;
++        ti->destNotOwned = true;
++        VecPush(nullptr, model->items, ti);
++        VecPush(nullptr, model->favs, fav);
++        i++;
++    }
++    return model;
++}
++
++// The model to hand to the Toc tree view: the plain outline unless the file has
++// user bookmarks, in which case they are shown above it.
++static TreeModel* BookmarksTreeModel(MainWindow* win, TocTree* toc) {
++    WindowTab* tab = win ? win->CurrentTab() : nullptr;
++    Str filePath = tab ? tab->filePath : Str{};
++    BookmarksModelSlot* slot = FindBookmarksSlot(win);
++    bool sameFile = slot && str::Eq(slot->filePath, filePath);
++    if (!sameFile) {
++        DropBookmarksModel(win);
++        slot = nullptr;
++        if (len(BookmarksForFile(filePath)) == 0) {
++            return (TreeModel*)toc;
++        }
++        BookmarksModelSlot s;
++        s.win = win;
++        s.filePath = str::Dup(filePath);
++        s.model = BuildBookmarksModel(win, toc);
++        VecPush(nullptr, gBookmarksModels, s);
++        return s.model;
++    }
++    // same file: refresh the outline pointer (it is rebuilt on reload)
++    bool hasOutline = toc && toc->root && toc->root->child;
++    slot->model->outline = hasOutline ? (TreeModel*)toc : nullptr;
++    if (len(slot->model->items) == 0) {
++        return (TreeModel*)toc;
++    }
++    return slot->model;
++}
++
++// Called after a bookmark was added / renamed / removed so the Bookmarks pane
++// picks up the change immediately.
++static void BookmarksAfterFavoritesChanged(MainWindow* win) {
++    if (!IsMainWindowValidAndNotClosing(win)) {
++        return;
++    }
++    WindowTab* tab = win->CurrentTab();
++    Str filePath = tab ? tab->filePath : Str{};
++    bool hasBookmarks = len(BookmarksForFile(filePath)) > 0;
++    // show the pane the bookmark landed in first, the way the bookmarks pane of
++    // a PDF editor opens when you add one: the tree has to be built into a
++    // panel that already has its final size, otherwise the control keeps the
++    // rows it had before the build
++    if (hasBookmarks && gSettings && gSettings->showToc && !IsSidebarViewShown(win, SidebarView::Bookmarks)) {
++        ShowSidebarView(win, SidebarView::Bookmarks);
++    }
++    if (win->tocLoaded || hasBookmarks) {
++        // Hide the control while it is rebuilt: deleting rows from a visible
++        // native tree leaves the remaining rows painted at the old offsets (a
++        // removed bookmark keeps its row on screen, shifted up by one), and
++        // only a hide/show resets them.
++        HWND hwndTree = win->tocTreeView ? win->tocTreeView->hwnd : nullptr;
++        if (hwndTree) {
++            ShowWindow(hwndTree, SW_HIDE);
++        }
++        ClearTocBox(win);
++        LoadTocTree(win);
++        if (hwndTree) {
++            ShowWindow(hwndTree, SW_SHOW);
++        }
++    }
++}
++
++void RefreshBookmarksForFavoritesChange(MainWindow* win) {
++    if (!win) {
++        return;
++    }
++    // Rebuilding from inside the command that changed the favorites leaves the
++    // tree control with a stale row count (an extra row and an unpainted
++    // background until the pane is hidden and shown again), so do it as the
++    // next task instead.
++    uitask::Post(MkFunc0(BookmarksAfterFavoritesChanged, win), "RefreshBookmarksTree");
++}
++
++static Favorite* FavoriteForTreeItem(MainWindow* win, TreeItem ti) {
++    auto* it = (TocItem*)ti;
++    if (!IsUserBookmarkItem(it)) {
++        return nullptr;
++    }
++    BookmarksModelSlot* slot = FindBookmarksSlot(win);
++    if (!slot) {
++        return nullptr;
++    }
++    int idx = it->id - kBookmarkItemIdBase;
++    if (idx < 0 || idx >= len(slot->model->favs)) {
++        return nullptr;
++    }
++    return slot->model->favs[idx];
++}
++
++static void ShowUserBookmarkContextMenu(MainWindow* win, Favorite* fav, Point pt) {
++    HMENU m = CreatePopupMenu();
++    MenuAppendString(m, Tr("Remove Bookmark"), 1);
++    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
++    DestroyMenu(m);
++    if (cmd != 1) {
++        return;
++    }
++    WindowTab* tab = win->CurrentTab();
++    FileState* fs = tab ? GetFavByFilePath(tab->filePath) : nullptr;
++    if (fs) {
++        DelFavorite(fs, fav);
++        ScheduleSaveSettings();
++    }
++}
++
+ static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
+     auto* treeView = ev->treeView;
+     auto ti = ev->treeItem;
+@@ -181,6 +481,7 @@
+     // and we need it to bail out early
+     win->tocLoaded = false;
+ 
++    DropBookmarksModel(win);
+     win->tocTreeView->Clear();
+     VecReset(win->tocMatchingItems);
+ 
+@@ -484,6 +785,10 @@
+     if (ti == TreeModel::kNullItem) {
+         pt = {ev->mouseScreen.x, ev->mouseScreen.y};
+     }
++    if (Favorite* fav = FavoriteForTreeItem(win, ti)) {
++        ShowUserBookmarkContextMenu(win, fav, pt);
++        return;
++    }
+     int pageNo = 0;
+     TocItem* dti = (TocItem*)ti;
+     IPageDestination* dest = dti ? dti->dest : nullptr;
+@@ -544,12 +849,12 @@
+         TempStr delText;
+         if (win->ctrl->HasChapters()) {
+             Location loc = win->ctrl->LocationFromPageNo(pageNo);
+-            addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
+-            delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
++            addText = fmt(Tr("Add Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
++            delText = fmt(Tr("Remove Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
+         } else {
+             TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+-            addText = fmt(Tr("Add page %s to favorites").s, pageLabel);
+-            delText = fmt(Tr("Remove page %s from favorites").s, pageLabel);
++            addText = fmt(Tr("Add Bookmark (page %s)").s, pageLabel);
++            delText = fmt(Tr("Remove Bookmark (page %s)").s, pageLabel);
+         }
+ 
+         if (isBookmarked) {
+@@ -564,6 +869,17 @@
+         MenuRemove(popup, CmdFavoriteAdd);
+         MenuRemove(popup, CmdFavoriteDel);
+     }
++    if (ti == TreeModel::kNullItem && win->ctrl) {
++        // right click below the last row: the obvious thing to offer is a
++        // bookmark for the page that's on screen
++        int curPage = win->ctrl->CurrentPageNo();
++        if (curPage > 0) {
++            TempStr lbl = fmt(Tr("Add Bookmark (page %s)").s, win->ctrl->GetPageLabeTemp(curPage));
++            TempStr item = AppendAccelKeyToMenuStringTemp(lbl, CmdFavoriteAdd);
++            InsertMenuW(popup, 0, MF_BYPOSITION | MF_STRING, CmdFavoriteAdd, CWStrTemp(item));
++            InsertMenuW(popup, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
++        }
++    }
+     RemoveBadMenuSeparators(popup);
+     MarkMenuOwnerDraw(popup);
+     uint flags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
+@@ -593,7 +909,11 @@
+             ExpandTocToCurrentPage(win);
+             break;
+         case CmdFavoriteAdd:
+-            AddFavoriteFromToc(win, dti);
++            if (dti) {
++                AddFavoriteFromToc(win, dti);
++            } else {
++                AddFavoriteForCurrentPage(win);
++            }
+             break;
+         case CmdFavoriteDel:
+             DelFavorite(filePath, pageNo, win->ctrl);
+@@ -640,7 +960,10 @@
+     }
+ 
+     auto* tocTree = tab->ctrl ? tab->ctrl->GetToc() : nullptr;
+-    if (!tocTree || !tocTree->root || !tocTree->root->child) {
++    bool hasOutline = tocTree && tocTree->root && tocTree->root->child;
++    // a file with only user bookmarks still gets a Bookmarks pane
++    bool hasBookmarks = len(BookmarksForFile(tab->filePath)) > 0;
++    if (!hasOutline && !hasBookmarks) {
+         return;
+     }
+ 
+@@ -650,7 +973,9 @@
+     // consider a ToC tree right-to-left if a more than half of the
+     // alphabetic characters are in a right-to-left script
+     int l2r = 0, r2l = 0;
+-    GetLeftRightCounts(tocTree->root, l2r, r2l);
++    if (hasOutline) {
++        GetLeftRightCounts(tocTree->root, l2r, r2l);
++    }
+     bool isRTL = r2l > l2r;
+ 
+     TreeView* treeView = win->tocTreeView;
+@@ -658,13 +983,15 @@
+     HwndSetRtl(hwnd, isRTL);
+ 
+     UpdateControlsColors(win);
+-    SetInitialExpandState(tocTree->root, tab->tocState);
+-    AutoExpandTopLevelItems(tocTree->root->child);
++    if (hasOutline) {
++        SetInitialExpandState(tocTree->root, tab->tocState);
++        AutoExpandTopLevelItems(tocTree->root->child);
++    }
+ 
+     treeView->onCustomDraw = MkFunc1Void(OnTocCustomDraw);
+     treeView->onMeasureLines = MkFunc1Void(OnTocMeasureLines);
+     treeView->SetWrapText(gSettings->tocWrapText);
+-    treeView->SetTreeModel(tocTree);
++    treeView->SetTreeModel(BookmarksTreeModel(win, tocTree));
+     if (SidebarPanel* p = SidebarPanelShowing(win, SidebarView::Bookmarks)) {
+         RelayoutSidebarPanel(p);
+     }
+@@ -677,14 +1004,17 @@
+         return;
+     }
+     WindowTab* tab = win->CurrentTab();
+-    if (!tab || !tab->currToc || !tab->currToc->root) {
++    if (!tab) {
++        return;
++    }
++    if (!tab->currToc && len(BookmarksForFile(tab->filePath)) == 0) {
+         return;
+     }
+     SidebarPanel* p = SidebarPanelShowing(win, SidebarView::Bookmarks);
+     if (!p || HwndClientRect(p->hwnd).IsEmpty() || !HwndIsVisible(p->hwnd)) {
+         return;
+     }
+-    win->tocTreeView->SetTreeModel(tab->currToc);
++    win->tocTreeView->SetTreeModel(BookmarksTreeModel(win, tab->currToc));
+ }
+ 
+ // The controller swapped in a different TocTree (the markdown / html TOC is
+@@ -1040,6 +1370,10 @@
+         ReportIf(true);
+         return;
+     }
++    if (Favorite* fav = FavoriteForTreeItem(win, ev->treeItem)) {
++        JumpToFavorite(win, fav);
++        return;
++    }
+     GoToTocTreeItem(win, (TocItem*)ev->treeItem, true);
+ }
+ 
+@@ -1066,6 +1400,10 @@
+         gTocSelChangedByMouseClick = true;
+     }
+     bool allowExternal = ev->byMouse;
++    if (Favorite* fav = FavoriteForTreeItem(win, ev->selectedItem)) {
++        JumpToFavorite(win, fav);
++        return;
++    }
+     GoToTocTreeItem(win, (TocItem*)ev->selectedItem, allowExternal);
+ }
+ 

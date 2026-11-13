@@ -1,0 +1,150 @@
+--- a/src/shared/RenderCache.cpp
++++ b/src/shared/RenderCache.cpp
+@@ -308,6 +308,7 @@
+         if ((dm == e->dm) && (pageNo == e->pageNo) && (rotation == e->rotation) &&
+             (kInvalidZoom == zoom || zoom == e->zoom) && (!tile || e->tile == *tile) &&
+             (e->darkModeEpoch == darkModeEpoch) && locOk) {
++            e->lastUse = GetTickCount64();
+             e->refs++;
+             ReportIf(i != e->cacheIdx);
+             return e;
+@@ -346,6 +347,11 @@
+     rcLogf("RenderCache::DropCacheEntry: dm: 0x%p, pageNo: %d, rotation: %d, zoom: %.2f\n", entry->dm, entry->pageNo,
+            entry->rotation, entry->zoom);
+ 
++    if ((size_t)entry->byteSize <= cachedBytes) {
++        cachedBytes -= (size_t)entry->byteSize;
++    } else {
++        cachedBytes = 0;
++    }
+     UnregisterCachedObject((uintptr_t)entry);
+     delete entry;
+ 
+@@ -375,9 +381,24 @@
+     return DropCacheEntry(entry);
+ }
+ 
++// Byte budget for rendered tiles, the counterpart of PDF-XChange Editor's
++// configurable page-cache limit. It's a soft target: tiles that are visible
++// right now are never evicted, so a single huge page can exceed it.
++size_t RenderCache::CacheBudgetBytes() {
++    // 256 MB is ~60 tiles of 1024x1024x4 bytes. Measured working sets while
++    // scrolling a 200-page document stay around 60-70 MB, so this leaves room
++    // for several screens of history at deep zoom while bounding the worst
++    // case (256 entries at 1024x1024x4 would be ~1 GB).
++    static constexpr size_t kBudget = (size_t)256 * 1024 * 1024;
++    return kBudget;
++}
++
++// entries not painted for this long are dropped unless their page is visible
++constexpr u64 kCacheIdleTtlMs = 5 * 60 * 1000;
++
+ static bool FreeIfFull(RenderCache* rc, const PageRenderRequest& req) {
+     int n = rc->cacheCount;
+-    if (n < kMaxBitmapsCached) {
++    if (n < kMaxBitmapsCached && rc->cachedBytes < rc->CacheBudgetBytes()) {
+         return true;
+     }
+ 
+@@ -417,7 +438,10 @@
+         }
+     }
+ 
+-    // ... or just the oldest cached page
++    // ... or the least recently painted page of another document. Picking the
++    // oldest (instead of the first we find) keeps the most recently looked-at
++    // tab warm when the budget is reached.
++    BitmapCacheEntry* oldest = nullptr;
+     for (int i = 0; i < n; i++) {
+         auto* entry = rc->cache[i];
+         if (entry->dm == dm) {
+@@ -427,14 +451,54 @@
+             // in a different window, but it's harder to detect
+             continue;
+         }
+-        bool didDrop = rc->DropCacheEntryIfNotUsed(entry);
+-        if (didDrop) {
+-            return true;
++        if (!oldest || entry->lastUse < oldest->lastUse) {
++            oldest = entry;
+         }
+     }
++    if (oldest && rc->DropCacheEntryIfNotUsed(oldest)) {
++        return true;
++    }
+     return false;
+ }
+ 
++// Drop entries that haven't been painted for kCacheIdleTtlMs. This is the
++// "idle timeout" half of the memory policy: closing a document already frees
++// its cache, but a document left open in a background tab would otherwise keep
++// its tiles until the count/byte limit pushes them out.
++void RenderCache::TrimIdleEntries() {
++    static u64 lastTrim = 0;
++    u64 now = GetTickCount64();
++    // don't walk the cache on every rendered tile
++    if (lastTrim && now - lastTrim < 5000) {
++        return;
++    }
++    lastTrim = now;
++    int nDropped = 0;
++    size_t freed = 0;
++    // must go from the end: dropping an entry moves the last one into its slot
++    for (int i = cacheCount - 1; i >= 0; i--) {
++        BitmapCacheEntry* e = cache[i];
++        if (e->refs > 1 || e->lastUse == 0) {
++            continue;
++        }
++        if (now - e->lastUse < kCacheIdleTtlMs) {
++            continue;
++        }
++        // never drop what a document currently shows, even if it hasn't been
++        // painted for a while (minimized window, background tab)
++        if (e->dm && e->dm->PageVisibleNearby(e->pageNo)) {
++            continue;
++        }
++        freed += (size_t)e->byteSize;
++        if (DropCacheEntryIfNotUsed(e)) {
++            nDropped++;
++        }
++    }
++    if (nDropped > 0) {
++        logf("RenderCache: dropped %d idle entries (%d MB)\n", nDropped, (int)(freed / (1024 * 1024)));
++    }
++}
++
+ extern RenderCache* gRenderCache;
+ 
+ // CachedObject ids come from an unlocked snapshot, so another thread may have
+@@ -485,19 +549,29 @@
+     /* It's possible there still is a cached bitmap with different zoom/rotation */
+     FreePage(req.dm, req.pageNo, &req.tile);
+ 
++    TrimIdleEntries();
++
+     bool hasSpace = FreeIfFull(this, req);
+-    ReportIf(!hasSpace); // TODO: FreeIfFull() might actually fail to free
+     ReportIf(cacheCount > kMaxBitmapsCached);
+-    if (!hasSpace || cacheCount >= kMaxBitmapsCached) {
++    if (cacheCount >= kMaxBitmapsCached) {
+         // Cannot grow past the fixed cache[]; drop this bitmap rather than overrun.
+         FreePixmap(bmp);
+         return;
+     }
++    if (!hasSpace) {
++        // Over the byte budget, but everything left is visible right now (or
++        // belongs to this document): keep the new tile anyway. Evicting what
++        // the user is looking at would only make it re-render in a loop.
++        rcLogf("RenderCache::Add: over budget (%lld bytes cached), keeping new tile\n", (long long)cachedBytes);
++    }
+ 
+     // Copy the PageRenderRequest as it will be reused
+     auto* entry = new BitmapCacheEntry(req.dm, req.pageNo, req.rotation, req.zoom, req.tile, bmp);
+     entry->loc = req.loc;
+     entry->darkModeEpoch = req.darkModeEpoch;
++    entry->byteSize = (int)PixmapByteSize(bmp);
++    entry->lastUse = GetTickCount64();
++    cachedBytes += (size_t)entry->byteSize;
+     entry->cacheIdx = cacheCount;
+     cache[cacheCount] = entry;
+     cacheCount++;

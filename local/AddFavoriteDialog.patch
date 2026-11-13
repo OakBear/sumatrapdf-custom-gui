@@ -1,0 +1,29 @@
+--- a/src/AddFavoriteDialog.cpp
++++ b/src/AddFavoriteDialog.cpp
+@@ -28,7 +28,7 @@
+ //   Name for page 5 (optional):
+ //   Chapter 2
+ //   ______________________________________________ underline
+-//                          [Cancel] [Add Favorite]
++//                          [Cancel] [Add Bookmark]
+ constexpr int kAddFavoriteDlgDx = 400;
+ constexpr int kFavFieldPadTop = 10;
+ constexpr int kFavFieldPadBottom = 16;
+@@ -114,7 +114,7 @@
+     {
+         CreateCustomArgs args;
+         args.owner = win ? win->hwndFrame : nullptr;
+-        args.title = Tr("Add Favorite");
++        args.title = Tr("Add Bookmark");
+         args.visible = false;
+         args.style = WS_POPUPWINDOW | WS_CAPTION;
+         args.font = fontText;
+@@ -149,7 +149,7 @@
+ 
+     btnCancel = NewDlgButton(hwnd, Tr("Cancel"), fontText, DlgButtonStyle::Outline, false);
+     btnCancel->onClick = MkMethod1<AddFavoriteWnd, VirtMouseEvent*, &AddFavoriteWnd::OnCancel>(this);
+-    btnOk = NewDlgButton(hwnd, Tr("Add Favorite"), fontText, DlgButtonStyle::Filled, true);
++    btnOk = NewDlgButton(hwnd, Tr("Add Bookmark"), fontText, DlgButtonStyle::Filled, true);
+     btnOk->onClick = MkMethod1<AddFavoriteWnd, VirtMouseEvent*, &AddFavoriteWnd::OnOk>(this);
+     vbox->AddChild(NewDlgFooter(btnCancel, btnOk));
+     layout = vbox;

@@ -1,0 +1,151 @@
+--- a/src/SumatraPDF.cpp
++++ b/src/SumatraPDF.cpp
+@@ -64,6 +64,9 @@
+ #include "FileHistory.h"
+ #include "PdfSync.h"
+ #include "RenderCache.h"
++
++// defined in shared/FavoritesCommon.cpp
++bool HasUserBookmarks(MainWindow* win);
+ #include "ProgressUpdateUI.h"
+ #include "TextSelection.h"
+ #include "TextSearch.h"
+@@ -1888,7 +1891,8 @@
+     if (!dm || dm->PageCount() < 2 || EngineMupdfHeadingTocPending(dm->GetEngine())) {
+         return false;
+     }
+-    return !win->ctrl->HasToc();
++    // a document with user bookmarks has something to show in the Bookmarks pane
++    return !win->ctrl->HasToc() && !HasUserBookmarks(win);
+ }
+ 
+ // placeWindow : if true then the Window will be moved/sized according
+@@ -3381,6 +3385,28 @@
+     ctrl = nullptr;
+ }
+ 
++extern bool gRestoringSessionSnapshot;
++
++// Record only an actually loaded PDF; do not create history for transient tabs.
++static void RememberPdfViewed(WindowTab* tab, bool duringStartup = false) {
++    if (!tab || (!duringStartup && gIsStartup) || gPluginMode || tab->skipHistory ||
++        !tab->win || tab->win->isQuickLook || !SettingsRememberOpenedFiles() ||
++        IsOpenCachePath(tab->filePath) || path::IsEphemeralHostFile(tab->filePath) ||
++        !tab->AsFixed() || !EngineMupdfIsPdf(tab->AsFixed()->GetEngine())) {
++        return;
++    }
++    FileState* ds = FileHistoryFindByPath(tab->filePath);
++    if (!ds) {
++        return;
++    }
++    SYSTEMTIME now{};
++    GetSystemTime(&now);
++    str::ReplaceWithCopy(&ds->lastOpenedUtc,
++                         fmt("%04u-%02u-%02uT%02u:%02u:%02uZ", now.wYear, now.wMonth, now.wDay,
++                             now.wHour, now.wMinute, now.wSecond));
++    ScheduleSaveSettings();
++}
++
+ MainWindow* LoadDocumentFinish(LoadArgs* args) {
+     MainWindow* win = args->win;
+     Str fullPath = args->FilePath();
+@@ -3524,6 +3550,11 @@
+     if (SettingsRememberOpenedFiles() && !skipHistory) {
+         ReportIf(!str::Eq(fullPath, path));
+         FileState* ds = FileHistoryMarkFileLoaded(fullPath);
++        // A selected lazy-restored tab is counted when its load completes;
++        // startup background loads must not mark every restored tab viewed.
++        if (!args->lazyLoad && (!args->noSavePrefs || (!gIsStartup && args->tabState))) {
++            RememberPdfViewed(currTab, !args->noSavePrefs);
++        }
+         if (gSettings->showStartPage) {
+             CreateThumbnailForFile(win, ds);
+         }
+@@ -4398,6 +4429,7 @@
+ 
+     win->currentTabTemp = tab;
+     win->ctrl = tab->ctrl;
++    RememberPdfViewed(tab);
+ 
+     if (tab->loadState == WindowTab::LoadState::LoadedPending) {
+         LoadArgs* args = tab->pendingLoadArgs;
+@@ -15227,6 +15259,18 @@
+     ResetTempArena();
+ }
+ 
++static void CALLBACK OnSessionSnapshotTimer(HWND, UINT, UINT_PTR, DWORD) {
++    logf("session snapshot timer fired\n");
++    if (!gIsStartup && !gDontSaveSettings && len(gWindows) > 0) {
++        SaveSettingsNow();
++    }
++    // The idle sweep in the render cache needs a periodic kick: when nothing is
++    // being rendered Add() isn't called, so the TTL would never be evaluated.
++    if (gRenderCache) {
++        gRenderCache->TrimIdleEntries();
++    }
++}
++
+ static int RunMessageLoop() {
+     MSG msg;
+ 
+@@ -17294,6 +17338,9 @@
+     }
+ 
+     if (restoreSession) {
++        // A reentrant save or exit must not publish a partially restored session.
++        gRestoringSessionSnapshot = true;
++        bool restoredAllWindows = true;
+         // each window goes back to the virtual desktop it was on (#6271)
+         ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+         MainWindow* winOnCurrentDesktop = nullptr;
+@@ -17374,6 +17421,7 @@
+             MoveWindowToVirtualDesktop(vdm, hwndFrame, desktopId);
+             bool onCurrentDesktop = IsWindowOnCurrentDesktop(vdm, hwndFrame);
+             if (!IsMainWindowValid(win) || sessionGen != gInitialSessionDataGen) {
++                restoredAllWindows = false;
+                 logf("WinMain: window closed or session re-saved while restoring, stopping\n");
+                 if (!IsMainWindowValid(win)) {
+                     win = nullptr;
+@@ -17396,6 +17444,12 @@
+         if (vdm) {
+             vdm->Release();
+         }
++        if (restoredAllWindows && !gDontSaveSettings) {
++            gRestoringSessionSnapshot = false;
++            ScheduleSaveSettings();
++        }
++        // If restoration was interrupted, keep the previous complete file
++        // untouched for this process; a later run can retry recovery.
+         // the last window shown took the foreground; if it went to another
+         // desktop, a window that stayed gets it and the cmd-line files instead
+         if (winOnCurrentDesktop && winOnCurrentDesktop != win && IsMainWindowValid(winOnCurrentDesktop)) {
+@@ -17471,6 +17525,12 @@
+     }
+ 
+     gIsStartup = false;
++    // Only the selected tab of each restored window is initially visible.
++    if (restoreSession) {
++        for (MainWindow* restoredWin : gWindows) {
++            RememberPdfViewed(restoredWin->CurrentTab());
++        }
++    }
+ 
+     if (len(flags.fileNames) > 0 && !win) {
+         // failed to create any window, even though there
+@@ -17568,7 +17628,15 @@
+         StartUiHangDetector();
+     }
+ 
+-    exitCode = RunMessageLoop();
++    // Thread timer starts only after startup restoration is complete. It has no
++    // window owner, so closing one window cannot cancel the session snapshot.
++    {
++        UINT_PTR sessionTimer = SetTimer(nullptr, 0, 3 * 60 * 1000, OnSessionSnapshotTimer);
++        exitCode = RunMessageLoop();
++        if (sessionTimer) {
++            KillTimer(nullptr, sessionTimer);
++        }
++    }
+     StopUiHangDetector();
+     SafeCloseHandle(&hMutex);
+     CleanUpThumbnailCache();

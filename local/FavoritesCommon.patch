@@ -1,0 +1,44 @@
+--- a/src/shared/FavoritesCommon.cpp
++++ b/src/shared/FavoritesCommon.cpp
+@@ -801,9 +801,24 @@
+     return res;
+ }
+ 
++// defined in TableOfContents.cpp: the Bookmarks pane shows the user's
++// bookmarks above the document outline, so it has to follow these changes
++void RefreshBookmarksForFavoritesChange(MainWindow* win);
++
++// true if the document shown in win has user bookmarks (Ctrl+B)
++bool HasUserBookmarks(MainWindow* win) {
++    WindowTab* tab = win ? win->CurrentTab() : nullptr;
++    if (!tab || len(tab->filePath) == 0) {
++        return false;
++    }
++    FileState* fs = GetFavByFilePath(tab->filePath);
++    return fs && fs->favorites && len(*fs->favorites) > 0;
++}
++
+ void UpdateFavoritesTreeForAllWindows() {
+     for (MainWindow* win : gWindows) {
+         UpdateFavoritesTree(win);
++        RefreshBookmarksForFavoritesChange(win);
+     }
+ }
+ 
+@@ -1017,12 +1032,12 @@
+         TempStr delText;
+         if (ShowChapterUi(ctrl)) {
+             Location loc = ctrl->LocationFromPageNo(pageNo);
+-            addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
+-            delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
++            addText = fmt(Tr("Add Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
++            delText = fmt(Tr("Remove Bookmark (chapter %d, page %d)").s, loc.chapter, loc.page);
+         } else {
+             TempStr label = ctrl->GetPageLabeTemp(pageNo);
+-            addText = fmt(Tr("Add page %s to favorites").s, label);
+-            delText = fmt(Tr("Remove page %s from favorites").s, label);
++            addText = fmt(Tr("Add Bookmark (page %s)").s, label);
++            delText = fmt(Tr("Remove Bookmark (page %s)").s, label);
+         }
+ 
+         if (isBookmarked) {

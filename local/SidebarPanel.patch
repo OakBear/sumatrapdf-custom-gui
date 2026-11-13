@@ -1,0 +1,44 @@
+--- a/src/SidebarPanel.cpp
++++ b/src/SidebarPanel.cpp
+@@ -32,6 +32,9 @@
+ #include "LayersUI.h"
+ #include "SidebarPanel.h"
+ 
++// defined in FavoritesCommon.cpp: true if this file has user bookmarks
++bool HasUserBookmarks(MainWindow* win);
++
+ constexpr int kViewIconDx = 16;
+ constexpr int kViewIconPad = 3;
+ 
+@@ -61,7 +64,7 @@
+         case SidebarView::Layers:
+             return Tr("Layers");
+         default:
+-            return Tr("Favorites");
++            return Tr("Bookmark List");
+     }
+ }
+ 
+@@ -117,7 +120,9 @@
+ bool IsSidebarViewAvailable(MainWindow* win, SidebarView v) {
+     switch (v) {
+         case SidebarView::Bookmarks:
+-            return win->IsDocLoaded() && win->ctrl && win->ctrl->HasToc();
++            // user bookmarks (Ctrl+B) live in this pane too, so it is available
++            // even when the document has no outline of its own
++            return win->IsDocLoaded() && win->ctrl && (win->ctrl->HasToc() || HasUserBookmarks(win));
+         case SidebarView::Thumbnails:
+             return CanShowThumbnails(win->CurrentTab());
+         case SidebarView::Signatures:
+@@ -531,7 +536,10 @@
+     for (int i = 0; i < kSidebarViewCount; i++) {
+         auto* b = new VirtIconButton();
+         b->onClick = MkFunc1(onClick[i], p);
+-        b->SetIsVisible(kind != SidebarPanelKind::FavoritesTab);
++        // the "Favorites" list is not offered: bookmarks (Ctrl+B) live in the
++        // Bookmarks pane and there is no reason to surface a second list
++        bool isFavView = ((SidebarView)i == SidebarView::Favorites);
++        b->SetIsVisible(kind != SidebarPanelKind::FavoritesTab && !isFavView);
+         p->viewBtns[i] = b;
+         header->AddChild(b);
+     }

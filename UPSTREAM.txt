@@ -1,0 +1,9 @@
+upstream: https://github.com/sumatrapdfreader/sumatrapdf
+commit:   075b05ce7cfe3fd0ce1eec9cdff2ae8ea00c6e53
+date:     2026-11-06 14:32:22 +0100
+subject:  Test font downloads offline on desktop and wasm
+clone:    /cluster/home/it_stu171/rea/sumatrapdf (pristine, no local modifications)
+
+This repository holds only the Linux cross-build harness, the local source
+overlays (local/*.cpp + local/*.patch) and the documentation. To reproduce a
+build: apply the patches from local/ onto the upstream tree above.

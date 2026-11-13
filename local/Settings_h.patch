@@ -1,0 +1,20 @@
+--- a/src/Settings.h
++++ b/src/Settings.h
+@@ -378,6 +378,8 @@
+     // if true, scrolling reads a two-column page down its left column,
+     // then its right one (View / Read Columns)
+     bool readColumns;
++    // UTC time of the last successful user-initiated PDF open; empty if unknown.
++    Str lastOpenedUtc;
+ };
+ 
+ // a subset of FileState required for restoring the state of a single
+@@ -1436,7 +1438,7 @@
+ struct StructInfo;
+ extern const StructInfo gFavoriteInfo;
+ extern const StructInfo gFileEBookUIInfo;
+-extern const FieldInfo gFileStateFields[36];
++extern const FieldInfo gFileStateFields[37];
+ extern StructInfo gFileStateInfo;
+ extern const StructInfo gTabStateInfo;
+ extern const StructInfo gSessionDataInfo;

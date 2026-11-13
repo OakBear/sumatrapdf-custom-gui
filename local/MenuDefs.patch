@@ -1,0 +1,50 @@
+--- a/src/shared/MenuDefs.cpp
++++ b/src/shared/MenuDefs.cpp
+@@ -615,22 +615,14 @@
+ 
+ MenuDef menuDefFavorites[] = {
+     {
+-        TrN("Add to favorites"),
++        TrN("Add Bookmark"),
+         CmdFavoriteAdd,
+     },
+     {
+-        TrN("Remove from favorites"),
++        TrN("Remove Bookmark"),
+         CmdFavoriteDel,
+     },
+     {
+-        TrN("Show Favorites"),
+-        CmdFavoriteToggle,
+-    },
+-    {
+-        TrN("Show Favorites in Tab"),
+-        CmdFavoriteShowInTab,
+-    },
+-    {
+         StrL(kMenuSeparator),
+         0,
+     },
+@@ -900,7 +892,7 @@
+         (UINT_PTR)menuDefReadAloud,
+     },
+     {
+-        TrN("F&avorites"),
++        TrN("&Bookmarks"),
+         (UINT_PTR)menuDefFavorites,
+     },
+     {
+@@ -1358,11 +1350,11 @@
+     },
+     // note: strings cannot be "" or else items are not there
+     {
+-        StrL("Add to favorites"),
++        StrL("Add Bookmark"),
+         CmdFavoriteAdd,
+     },
+     {
+-        StrL("Remove from favorites"),
++        StrL("Remove Bookmark"),
+         CmdFavoriteDel,
+     },
+     {
