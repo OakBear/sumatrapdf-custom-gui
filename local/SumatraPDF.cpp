@@ -158,6 +158,12 @@ bool HasUserBookmarks(MainWindow* win);
 #include "OpenFromUrlCommon.h"
 #include "AppHelpersCommon.h"
 #include "SumatraLog.h"
+#include "CropDialog.h"
+#include "TraceLog.h"
+#include "TrimSched.h"
+// Single definition of the trace-log worker; every other translation unit only
+// sees the declarations in TraceLog.h.
+#include "TraceLog_impl.inc"
 
 using Gdiplus::Graphics;
 using Gdiplus::Pen;
@@ -527,6 +533,10 @@ void BeginDocumentLoad(Str file) {
     if (len(file) == 0) {
         return;
     }
+    // The trace log follows the document from the moment loading starts, so a
+    // freeze during the load itself is still tied to the right file.
+    tracelog::SetDocument(file.s);
+    tracelog::Stage("load-async");
     if (IndexOfLoadingFile(file) >= 0) {
         return;
     }
@@ -534,6 +544,7 @@ void BeginDocumentLoad(Str file) {
 }
 
 void EndDocumentLoad(Str file) {
+    tracelog::Stage("idle");
     int idx = IndexOfLoadingFile(file);
     if (idx >= 0) {
         gFilesLoading.RemoveAt(idx);
@@ -3408,9 +3419,28 @@ static void RememberPdfViewed(WindowTab* tab, bool duringStartup = false) {
 }
 
 MainWindow* LoadDocumentFinish(LoadArgs* args) {
+    // Everything here runs on the UI thread and includes building the page list
+    // and the first layout, which is where a large document really costs time.
+    ULONGLONG loadFinishStartedAt = GetTickCount64();
+    tracelog::Stage("load-finish");
+    defer {
+        ULONGLONG ms = GetTickCount64() - loadFinishStartedAt;
+        Str p = args->FilePath();
+        int pages = 0;
+        if (args->win) {
+            DisplayModel* dm = args->win->AsFixed();
+            if (dm) {
+                pages = dm->PageCount();
+            }
+        }
+        tracelog::Event("open: done %s pages=%d %llu ms", p.s ? p.s : "", pages, (unsigned long long)ms);
+        tracelog::Stage("idle");
+    };
     MainWindow* win = args->win;
     Str fullPath = args->FilePath();
     WindowTab* targetTab = args->targetTab;
+
+    tracelog::Event("open: begin %s", fullPath.s ? fullPath.s : "");
 
     // it loaded, so it's no longer one of the files next/prev skips
     MarkFileOpenedOk(fullPath);
@@ -3486,6 +3516,19 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
         ReplaceDocumentInCurrentTab(args, args->ctrl, nullptr);
     }
 
+    // Local: remember the Briss per-page crops saved for this document. They are
+    // applied a moment later, from ApplySavedPageCropsAfterFirstLayout(): forcing
+    // the relayout that applying them causes from here, while the tab is still
+    // being set up, walks a page list that isn't ready yet.
+    if (!lazyLoad && win->AsFixed()) {
+        DisplayModel* dm = win->AsFixed();
+        FileState* fs = FileHistoryFindByPath(fullPath);
+        if (fs && fs->pageCrops && len(*fs->pageCrops) == 4 * (int)dm->PageCount()) {
+            dm->savedPageCrops = *fs->pageCrops;
+            dm->pageCropsOn = false;
+        }
+    }
+
     if (!IsMainWindowValidAndNotClosing(win)) {
         return nullptr;
     }
@@ -3522,6 +3565,11 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
         // asynchronously, so RestoreTabOnStartup can't do it after the load)
         SetTabState(currTab, args->tabState);
     }
+    // Local: per-page crops saved by the Briss whole-document analysis. Restored
+    // here, after the document is actually in the tab, rather than in
+    // SetTabState: the page list doesn't exist yet at that point. Runs only
+    // when the saved rectangle count matches this many pages, so a file that
+    // changed since the analysis is left alone.
     // forceReuse / targetTab loads skip CloseDocumentInCurrentTab, so the
     // previous document's watcher can still be set (e.g. open next file in
     // folder, multi-file open). Always drop it before re-subscribing.
@@ -8047,6 +8095,28 @@ static void ToggleUniformPageWidth(MainWindow* win) {
     dm->SetScrollState(state);
 }
 
+// Briss crop on/off. "Show whole pages" (the original page) and back to the
+// saved per-page crops, without running the analysis again and without touching
+// the PDF: the rectangles live in the session data.
+static void TogglePageCrops(MainWindow* win) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    if (dm->pageCropsOn) {
+        dm->ClearPageCrops();
+        return;
+    }
+    Vec<RectF> crops = dm->GetSavedPageCropFractions();
+    if (len(crops) == 0) {
+        return;
+    }
+    dm->ApplyPageCropFractions(crops);
+}
+
 static void ToggleTrimEmptyMargins(MainWindow* win) {
     DisplayModel* dm = win->AsFixed();
     if (!dm) {
@@ -10593,6 +10663,19 @@ void UndoRedoUnavailable(MainWindow*, bool) {}
 static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     int cmdId = LOWORD(wp);
     int invokedCmdId = cmdId;
+    // A command runs to completion on the UI thread, so a slow one is a freeze
+    // the user sees; record its id and how long it blocked.
+    ULONGLONG cmdStartedAt = GetTickCount64();
+    tracelog::Stage("command");
+    defer {
+        ULONGLONG ms = GetTickCount64() - cmdStartedAt;
+        if (ms >= 300) {
+            Str name = GetCommandName(invokedCmdId);
+            tracelog::Event("command %d (%s) took %llu ms", invokedCmdId, name.s ? name.s : "?",
+                            (unsigned long long)ms);
+        }
+        tracelog::Stage("idle");
+    };
     bool isAnnotationPlacementCommit = HIWORD(wp) == kAnnotationPlacementCommandCode;
 
     if (cmdId >= 0xF000) {
@@ -11175,6 +11258,16 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdShowWholePages:
             ShowWholePages(win);
+            break;
+
+        case CmdTogglePageCrops:
+            // local addition: Briss crop on / original pages, without re-analysis
+            TogglePageCrops(win);
+            break;
+
+        case cropdlg::kCmdId:
+            // local addition: the interactive crop adjustment window
+            ShowCropAdjustDialog(win);
             break;
 
         case CmdToggleReadColumns:
@@ -14322,6 +14415,14 @@ static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (!win) {
                 break;
             }
+            // Wheel messages may go to the focused frame instead of the tab child.
+            if (win->tabsCtrl && win->tabsCtrl->hwnd && IsWindowVisible(win->tabsCtrl->hwnd)) {
+                POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                RECT tabRect;
+                if (GetWindowRect(win->tabsCtrl->hwnd, &tabRect) && PtInRect(&tabRect, pt)) {
+                    return SendMessageW(win->tabsCtrl->hwnd, msg, wp, lp);
+                }
+            }
             // the canvas never has focus, so the wheel arrives here. Home is not
             // a loaded document, but the list still scrolls (#6462)
             if (win->IsCurrentTabAbout()) {
@@ -15271,10 +15372,56 @@ static void CALLBACK OnSessionSnapshotTimer(HWND, UINT, UINT_PTR, DWORD) {
     }
 }
 
+// The trace log writes next to the document, so it needs to know which one is
+// showing. Polling here covers every way a document can arrive (dialog, drop,
+// command line, tab switch) without touching the loading code.
+static void TraceCurrentDocuments() {
+    for (MainWindow* win : gWindows) {
+        DisplayModel* dm = win->AsFixed();
+        Str path = dm ? dm->GetFilePath() : Str();
+        if (len(path) > 0) {
+            tracelog::SetDocument(path.s);
+            continue;
+        }
+        // still loading, or a tab that isn't a DisplayModel: ask the tab
+        WindowTab* tab = win->CurrentTab();
+        if (tab && tab->ctrl) {
+            Str tabPath = tab->ctrl->GetFilePath();
+            if (len(tabPath) > 0) {
+                tracelog::SetDocument(tabPath.s);
+            }
+        }
+    }
+}
+
+// Auto-crop detection gives up at a time budget so opening a large document
+// cannot freeze the window; finish the remaining pages here, when there is no
+// input waiting, and repaint if anything changed.
+static void RunDeferredWork() {
+    if (!TrimDetectionPending()) {
+        return;
+    }
+    for (MainWindow* win : gWindows) {
+        DisplayModel* dm = win->AsFixed();
+        if (!dm) {
+            continue;
+        }
+        bool trimmed = dm->EnsureTrimEmptyMarginsForVisiblePages();
+        if (trimmed) {
+            dm->RenderVisibleParts();
+            InvalidateRect(win->hwndCanvas, nullptr, FALSE);
+        }
+    }
+}
+
 static int RunMessageLoop() {
     MSG msg;
 
+    tracelog::Start();
+    tracelog::Stage("idle");
+
     while (GetMessage(&msg, nullptr, 0, 0)) {
+        tracelog::Heartbeat();
         if (PreTranslateMessage(msg)) {
             continue;
         }
@@ -15287,9 +15434,16 @@ static int RunMessageLoop() {
         }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+        tracelog::Heartbeat();
         ResetTempArenaWithLogging();
+        TraceCurrentDocuments();
+        // only when nothing else is waiting, so interaction always wins
+        if (!PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE)) {
+            RunDeferredWork();
+        }
     }
 
+    tracelog::Shutdown();
     return (int)msg.wParam;
 }
 

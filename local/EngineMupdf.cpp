@@ -3736,6 +3736,33 @@ static void DropDisplayListsForLayers(EngineMupdf* e) {
     });
 }
 
+// A cached page display list pins the page's decoded images: the image store
+// can't evict an entry while a list still references it, so walking a whole
+// document -- auto-crop measures every page, thumbnails and search touch many --
+// grew the process by ~20 MB per scanned page (5 GB and climbing on a 660-page
+// book of 3700 pt pages). Dropping the lists we are done with returns their
+// images to the store's 64 MB budget. keepPageNo stays cached: it's the page
+// being measured or shown, so a repaint doesn't rebuild it.
+void EngineMupdfTrimPageCaches(EngineBase* engine, int keepPageNo) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return;
+    }
+    auto* ctx = e->Ctx();
+    // Lock order pagesLock -> renderLock, as in EngineMupdfApplyRedactions.
+    ScopedRecursiveMutex pagesScope(&e->pagesLock);
+    ScopedMutex renderScope(&e->renderLock);
+    ForEachPageInfo(e, [ctx, keepPageNo](FzPageInfo* pi) {
+        if (pi->pageNo == keepPageNo) {
+            return;
+        }
+        if (pi->displayList) {
+            fz_drop_display_list(ctx, pi->displayList);
+            pi->displayList = nullptr;
+        }
+    });
+}
+
 class PasswordCloner : public PasswordUI {
     u8* cryptKey = nullptr;
 
