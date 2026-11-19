@@ -19,3 +19,9 @@ local/sdk-lib-aliases/
 *.bak-*
 wine-*.png
 pdf-reference-page*.png
+
+# preview builds are distributed via GitHub Releases, not committed
+dist/*-preview.exe
+
+# stray test scratch dirs created in the workspace root
+tmpsumatra-*/

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Adapt the isolated Premake graph for Linux-hosted LLVM (experimental)."""
 from pathlib import Path
+import os
 import re
 import shutil
 
@@ -48,6 +49,15 @@ for path in dst.glob("*.ninja"):
         gfx_source = "../../src/gui/Gfx.cpp"
         assert gfx_source in s
         s = s.replace(gfx_source, str(root / "local/Gfx.cpp"))
+        for name in ("TabsCtrl.cpp", "Tooltip.cpp"):
+            source = "../../src/gui/win/" + name
+            assert source in s
+            s = s.replace(source, str(root / "local" / name))
+        s = s.replace("../../src/shared/TabsCommon.cpp", str(root / "local/TabsCommon.cpp"))
+        s = s.replace("../../src/SumatraPDF.cpp", str(root / "local/SumatraPDF.cpp"))
+        s = s.replace("../../src/shared/DisplayModel.cpp", str(root / "local/DisplayModel.cpp"))
+        s = s.replace("../../src/shared/MenuDefs.cpp", str(root / "local/MenuDefs.cpp"))
+        s = s.replace("../../src/shared/Commands.cpp", str(root / "local/Commands.cpp"))
         s = s.replace("../../src/shared/ReadAloud_win.cpp", str(root / "local/ReadAloud_win.cpp"))
         libdirs = [tools / "sdk/crt/lib/x86_64", tools / "sdk/sdk/lib/ucrt/x86_64", tools / "sdk/sdk/lib/um/x86_64"]
         def normalize_libs(match):
@@ -76,6 +86,10 @@ for path in dst.glob("*.ninja"):
                 "build " + archive + ": pack_static_linux | always_pack_static_linux\n"
                 "build " + resource + ": rc_msc-v145 SumatraPDF-linux.rc | " + archive + " " + " ".join(inputs) + "\n"
                 "  resflags = /I../../src /I../../src/shared /D EMBEDDED_PAK=../../out/rel64/embedded-static.lzsa\n")
+        if os.environ.get("SUMATRA_REUSE_EMBEDDED") == "1":
+            if not (root / "tree/out/rel64/embedded-static.lzsa").is_file():
+                raise RuntimeError("existing embedded resource archive not found")
+            edge = edge.replace(": pack_static_linux | always_pack_static_linux", ": pack_static_linux")
         s = s.replace(marker, edge + marker + resource + " ", 1)
     path.write_text(s)
     for line in s.splitlines():

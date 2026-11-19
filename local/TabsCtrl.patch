@@ -1,0 +1,283 @@
+--- a/src/gui/win/TabsCtrl.cpp
++++ b/src/gui/win/TabsCtrl.cpp
+@@ -16,6 +16,8 @@
+ #include "gui/win/TabsCtrl.h"
+ #include "AppHelpersCommon.h"
+ 
++#include <string>
++
+ // Forward declaration - defined in MainWindow.cpp
+ struct MainWindow;
+ MainWindow* FindMainWindowByHwnd(HWND hwnd);
+@@ -390,6 +392,76 @@
+     }
+ }
+ 
++//--- Fixed button for the list of all tabs
++
++static bool TriggerSelectionChanging(TabsCtrl* tabs);
++static void TriggerSelectionChanged(TabsCtrl* tabs);
++
++struct TabsListBtn : VirtCtrl {
++    TabsCtrl* tabsCtrl = nullptr;
++    TabsListBtn() {
++        colorDefaults = gColsTab;
++        nColors = kColTabCount;
++        cursor = CursorId::Hand;
++        onMouseEnter = MkMethod0<TabsListBtn, &TabsListBtn::OnInvalidate>(this);
++        onMouseLeave = MkMethod0<TabsListBtn, &TabsListBtn::OnInvalidate>(this);
++        onClick = MkMethod1<TabsListBtn, VirtMouseEvent*, &TabsListBtn::OnClick>(this);
++    }
++    void OnInvalidate() { Invalidate(); }
++    void Paint(VirtPaintCtx& ctx) override {
++        Rect r = ctx.bounds;
++        Color bg = GetColor(kColTabBg);
++        if (HasFlag(vwfHovered)) {
++            bg = AccentColor(GetColor(kColTabInactiveBg), 10);
++            ctx.gfx->FillRect(r, bg);
++        }
++        Color col = TabTextColorForBackground(GetColor(kColTabText), bg);
++        int x = r.x + r.dx / 2;
++        int y = r.y + r.dy / 2;
++        int arm = std::max(1, DpiScale(4));
++        ctx.gfx->DrawLineAA({x - arm, y - arm / 2}, {x, y + arm / 2}, col, 2.0f, 255);
++        ctx.gfx->DrawLineAA({x, y + arm / 2}, {x + arm, y - arm / 2}, col, 2.0f, 255);
++    }
++    void OnClick(VirtMouseEvent*) {
++        TabsCtrl* tabs = tabsCtrl;
++        HWND hwnd = tabs->hwnd;
++        HMENU menu = CreatePopupMenu();
++        if (!menu) return;
++        Vec<TabInfo*> entries;
++        for (int i = 0; i < tabs->TabCount(); i++) {
++            TabInfo* tab = tabs->GetTab(i);
++            VecAppend(entries, tab);
++            // Numbering distinguishes identical titles and escaping keeps '&' literal.
++            std::wstring label = std::to_wstring(i + 1) + L". ";
++            const WCHAR* title = CWStrTemp(tab->text);
++            if (title) {
++                for (const WCHAR* c = title; *c; c++) {
++                    if (*c == L'&') label += L'&';
++                    label += *c;
++                }
++            }
++            AppendMenuW(menu, MF_STRING | (i == tabs->selectedIdx ? MF_CHECKED : 0), i + 1, label.c_str());
++        }
++        Rect r = BoundsInWindow();
++        POINT pt = {r.Right(), r.Bottom()};
++        ClientToScreen(hwnd, &pt);
++        int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_RIGHTBUTTON,
++                                 pt.x, pt.y, 0, hwnd, nullptr);
++        DestroyMenu(menu);
++        // The menu pumps messages; the window or tab list may have changed.
++        if (!IsWindow(hwnd) || (TabsCtrl*)GetWindowLongPtrW(hwnd, GWLP_USERDATA) != tabs ||
++            cmd <= 0 || cmd > len(entries)) return;
++        int idx = VecFind(tabs->tabs, entries[cmd - 1]);
++        if (idx < 0 || idx == tabs->selectedIdx) return;
++        bool prevent = TriggerSelectionChanging(tabs);
++        if (prevent || !IsWindow(hwnd) || (TabsCtrl*)GetWindowLongPtrW(hwnd, GWLP_USERDATA) != tabs) return;
++        idx = VecFind(tabs->tabs, entries[cmd - 1]);
++        if (idx < 0) return;
++        tabs->SetSelected(idx);
++        TriggerSelectionChanged(tabs);
++    }
++};
++
+ //--- TabsCtrl host window
+ 
+ static LRESULT CALLBACK TabsCtrlWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+@@ -495,10 +567,32 @@
+     return VirtCtrl::IsVisible();
+ }
+ 
++// A viewport clips both painting and hit testing. Its state survives child rebuilds.
++struct TabsViewport : VirtCtrl {
++    int offset = 0;
++    int maxOffset = 0;
++    int wheelRemainder = 0;
++    TabsViewport() { flags |= vwfClipChildren | vwfNoHitTest; }
++    void PaintChildren(VirtPaintCtx& ctx) override {
++        ctx.gfx->PushClip(ctx.clip);
++        VirtCtrl::PaintChildren(ctx);
++        ctx.gfx->PopClip();
++    }
++};
++
++static TabsViewport* GetTabsViewport(TabsCtrl* tabs) {
++    return tabs->ChildCount() ? (TabsViewport*)tabs->ChildAt(0) : nullptr;
++}
++
+ // the tab wnds are rebuilt whenever the tab list changes: there are few of them
+ // and it keeps the tree and the list impossible to get out of step
+ void TabsCtrl::RebuildTabCtrls() {
++    TabsViewport* oldViewport = GetTabsViewport(this);
++    int offset = oldViewport ? oldViewport->offset : 0;
+     RemoveAllChildren(true);
++    auto* viewport = new TabsViewport();
++    viewport->offset = offset;
++    AddChild(viewport);
+     VecReset(tabCtrls);
+     int n = TabCount();
+     for (int i = 0; i < n; i++) {
+@@ -506,11 +600,14 @@
+         w->tabsCtrl = this;
+         w->ti = tabs[i];
+         VecAppend(tabCtrls, w);
+-        AddChild(w);
++        viewport->AddChild(w);
+     }
+     plusBtn = new TabsPlusBtn();
+     plusBtn->tabsCtrl = this;
+     AddChild(plusBtn);
++    auto* listBtn = new TabsListBtn();
++    listBtn->tabsCtrl = this;
++    AddChild(listBtn);
+ }
+ 
+ // label plus 1rem (the font's size in pixels) on each side, and room for the
+@@ -572,8 +669,9 @@
+     }
+     // the "+" is square and always there. Fit-to-label tabs take what their label
+     // needs, the others share the rest
+-    int plusDx = dy;
+-    int availDx = rect.dx - 5 - plusDx;
++    int listDx = std::min(dy, rect.dx);
++    int plusDx = std::min(dy, rect.dx - listDx);
++    int availDx = std::max(0, rect.dx - plusDx - listDx);
+     int restDx = availDx;
+     int nRest = 0;
+     for (int i = 0; i < nTabs; i++) {
+@@ -581,7 +679,7 @@
+             nRest++;
+             continue;
+         }
+-        int fitDx = std::min(FitToLabelDx(this, tabs[i], dy), availDx / nTabs);
++        int fitDx = FitToLabelDx(this, tabs[i], dy);
+         tabCtrls[i]->idealSize = {fitDx, dy};
+         restDx -= fitDx;
+     }
+@@ -603,32 +701,31 @@
+     } else {
+         dx = FairShareCap(nameDx, restDx);
+     }
++    dx = std::max(dx, std::min(tabDefaultDx, DpiScale(kTabMinDx)));
+     tabSize = {dx, dy};
+ 
+     int totalW = 0;
+     int nameIdx = 0;
+     for (int i = 0; i < nTabs; i++) {
+         if (!tabs[i]->fitToLabel) {
+-            int tabDx = equalWidth ? dx : std::min(dx, nameDx[nameIdx++]);
++            int tabDx = equalWidth ? dx : std::max(std::min(dx, nameDx[nameIdx++]),
++                                                       std::min(tabDefaultDx, DpiScale(kTabMinDx)));
+             tabCtrls[i]->idealSize = {tabDx, dy};
+         }
+         totalW += tabCtrls[i]->idealSize.dx;
+     }
+ 
+-    // pack tabs left-to-right (LTR) or right-aligned with reversed order (RTL)
+     bool isRtl = IsTabsRtl(hwnd);
+-    int x = 0;
+-    if (isRtl && totalW + plusDx < rect.dx) {
+-        x = rect.dx - totalW - plusDx;
+-    }
++    TabsViewport* viewport = GetTabsViewport(this);
++    viewport->maxOffset = std::max(0, totalW - availDx);
++    viewport->offset = limitValue(viewport->offset, 0, viewport->maxOffset);
+     vroot->SetBounds(rect);
+     VirtCtrl::SetBounds(rect);
+-
+-    // RTL: the tabs run right to left, so what comes after them is on the left
+-    if (isRtl) {
+-        plusBtn->SetBounds({rect.x + x, rect.y, plusDx, dy});
+-        x += plusDx;
+-    }
++    int viewX = isRtl ? plusDx : 0;
++    viewport->SetBounds({viewX, 0, availDx, dy});
++    int x = isRtl ? viewX + availDx - totalW + viewport->offset : viewX - viewport->offset;
++    plusBtn->SetBounds({isRtl ? 0 : availDx, 0, plusDx, dy});
++    ChildAt(2)->SetBounds({rect.dx - listDx, 0, listDx, dy});
+     for (int i = 0; i < nTabs; i++) {
+         int idx = isRtl ? (nTabs - 1 - i) : i;
+         TabCtrl* t = tabCtrls[idx];
+@@ -637,8 +734,26 @@
+         t->SetBounds({rect.x + r.x, rect.y + r.y, r.dx, r.dy});
+         x += r.dx;
+     }
+-    if (!isRtl) {
+-        plusBtn->SetBounds({rect.x + x, rect.y, plusDx, dy});
++}
++
++// Bring a selected tab into view without undoing a manual wheel scroll on layout.
++static void EnsureSelectedVisible(TabsCtrl* tabs) {
++    TabsViewport* viewport = GetTabsViewport(tabs);
++    TabCtrl* tab = tabs->TabCtrlAt(tabs->selectedIdx);
++    if (!viewport || !tab || viewport->bounds.dx <= 0) return;
++    Rect view = viewport->BoundsInWindow();
++    Rect r = tab->BoundsInWindow();
++    int shift = 0;
++    if (r.dx > view.dx) {
++        shift = IsTabsRtl(tabs->hwnd) ? view.Right() - r.Right() : view.x - r.x;
++    } else if (r.x < view.x) {
++        shift = view.x - r.x;
++    } else if (r.Right() > view.Right()) {
++        shift = view.Right() - r.Right();
++    }
++    if (shift) {
++        viewport->offset += IsTabsRtl(tabs->hwnd) ? shift : -shift;
++        tabs->LayoutTabs();
+     }
+ }
+ 
+@@ -976,7 +1091,8 @@
+             }
+             mousePos = HwndScreenToClient(hwnd, mousePos);
+             tabState = TabStateFromMousePosition(mousePos);
+-            if (tabState.tabIdx >= 0 || (plusBtn && plusBtn->BoundsInWindow().Contains(mousePos))) {
++            if (tabState.tabIdx >= 0 || (plusBtn && plusBtn->BoundsInWindow().Contains(mousePos)) ||
++                (ChildCount() > 2 && ChildAt(2)->BoundsInWindow().Contains(mousePos))) {
+                 return HTCLIENT;
+             }
+             return HTTRANSPARENT;
+@@ -984,8 +1100,25 @@
+ 
+         case WM_SIZE:
+             LayoutTabs();
++            EnsureSelectedVisible(this);
+             break;
+ 
++        case WM_MOUSEWHEEL:
++        case WM_MOUSEHWHEEL: {
++            TabsViewport* viewport = GetTabsViewport(this);
++            if (!viewport) return 0;
++            viewport->wheelRemainder += GET_WHEEL_DELTA_WPARAM(wp);
++            int steps = viewport->wheelRemainder / WHEEL_DELTA;
++            viewport->wheelRemainder %= WHEEL_DELTA;
++            int direction = msg == WM_MOUSEWHEEL ? -1 : 1;
++            if (IsTabsRtl(hwnd)) direction = -direction;
++            viewport->offset += direction * steps * DpiScale(80);
++            LayoutTabs();
++            UpdateHover(TabStateFromMousePosition(HwndGetCursorPos(hwnd)).tabIdx);
++            ScheduleRepaint();
++            return 0;
++        }
++
+         case WM_MOUSELEAVE: {
+             if (tabWidthFrozen) {
+                 tabWidthFrozen = false;
+@@ -1309,6 +1442,7 @@
+         selectedIdx = -1;
+     }
+     LayoutTabs();
++    EnsureSelectedVisible(this);
+     // the rebuilt tabs only show once painted; a close not from a tab's X (a
+     // command, the context menu) has nothing else repaint the strip (#6469)
+     if (TabCount() > 0) {
+@@ -1368,6 +1502,7 @@
+     ReportIf(idx < 0 || idx >= nTabs);
+     int prevSelectedIdx = selectedIdx;
+     selectedIdx = idx;
++    EnsureSelectedVisible(this);
+     UpdateHover(tabHighlighted);
+     HwndRepaintNow(hwnd);
+     return prevSelectedIdx;

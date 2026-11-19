@@ -1,0 +1,19 @@
+--- a/src/gui/win/Tooltip.cpp
++++ b/src/gui/win/Tooltip.cpp
+@@ -280,7 +280,15 @@
+     if (!hwnd || !parent) {
+         return -1;
+     }
+-    if (len(s) > 256) {
++    // The tab strip owns its tooltip host. Preserve its path text; other
++    // controls keep the existing length limit and single-line behavior.
++    WCHAR className[64] = {};
++    bool isTabStrip = GetClassNameW(parent, className, dimof(className)) &&
++                      wcscmp(className, L"SumatraTabsCtrlClass") == 0;
++    if (isTabStrip) {
++        multiline = true;
++    }
++    if (!isTabStrip && len(s) > 256) {
+         // pathological cases make for tooltips that take too long to display
+         // https://github.com/sumatrapdfreader/sumatrapdf/issues/2814
+         s = Str(ShortenStringUtf8InTheMiddleTemp(s, 250));

@@ -1,0 +1,33 @@
+--- a/src/shared/TabsCommon.cpp
++++ b/src/shared/TabsCommon.cpp
+@@ -31,25 +31,17 @@
+ #include "Tabs.h"
+ #include "TabsCommon.h"
+ 
+-// always full path (FullPathInTitle only affects tab/window title text).
+-// Append size when GetSize succeeds (may fail for offline network paths).
+-// Used by Tabs and Toolbar (toolbar was overwriting tooltips with path-only).
+-// full path + size (if available); optional dirty suffix for unsaved annotations
++// Show the filename first and the full display path on the next line.
+ TempStr MakeTabTooltipTemp(Str path, bool dirty) {
+     if (len(path) == 0) {
+         return Str{};
+     }
+-    TempStr tip;
+-    i64 size = file::GetSize(path);
+-    if (size >= 0) {
+-        tip = fmt("%s  %s", PathForDisplayTemp(path), str::FormatSizeShortTemp(size, nullptr));
+-    } else {
+-        tip = PathForDisplayTemp(path);
+-    }
++    TempStr displayPath = PathForDisplayTemp(path);
++    TempStr name = path::GetBaseNameTemp(displayPath);
+     if (dirty) {
+-        tip = str::JoinTemp(tip, StrL(" "), Tr("(unsaved annotations)"));
++        name = str::JoinTemp(name, StrL(" "), Tr("(unsaved annotations)"));
+     }
+-    return tip;
++    return fmt("%s\n%s", name, displayPath);
+ }
+ 
+ TempStr TabPageSuffixTemp(WindowTab* tab) {
